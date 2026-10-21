@@ -1,0 +1,392 @@
+
+name: Build PixelForge APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/com/pixelforge
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "PixelForge"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.pixelforge"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.pixelforge"
+                  minSdk = 23
+                  targetSdk = 28
+                  versionCode = 1
+                  versionName = "0.1"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="PixelForge"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:allowBackup="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/pixelforge/MainActivity.kt <<'EOF'
+          package com.pixelforge
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.widget.Button
+          import android.widget.HorizontalScrollView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.util.ArrayDeque
+
+          class MainActivity : Activity() {
+              private lateinit var drawing: PixelCanvas
+              private var selectedColor = Color.BLACK
+              private val paletteColors = intArrayOf(
+                  Color.BLACK, Color.WHITE, Color.RED, 0xFFFF9800.toInt(),
+                  Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE,
+                  0xFF9C27B0.toInt(), 0xFFFF4081.toInt(), 0xFF795548.toInt(),
+                  0xFF9E9E9E.toInt()
+              )
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(12, 12, 12, 12)
+                      setBackgroundColor(Color.rgb(30, 32, 38))
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "PixelForge"
+                      textSize = 26f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      setPadding(0, 8, 0, 16)
+                  }
+                  root.addView(title)
+
+                  val paletteScroll = HorizontalScrollView(this)
+                  val palette = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                  }
+
+                  paletteColors.forEach { color ->
+                      val swatch = Button(this).apply {
+                          text = "■"
+                          textSize = 22f
+                          setTextColor(color)
+                          setOnClickListener {
+                              selectedColor = color
+                              drawing.currentColor = color
+                          }
+                      }
+                      palette.addView(swatch, LinearLayout.LayoutParams(52, 52))
+                  }
+
+                  paletteScroll.addView(palette)
+                  root.addView(paletteScroll)
+
+                  drawing = PixelCanvas()
+                  root.addView(
+                      drawing,
+                      LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          0,
+                          1f
+                      ).apply {
+                          setMargins(0, 16, 0, 16)
+                      }
+                  )
+
+                  val buttons = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER
+                  }
+
+                  fun addAction(label: String, action: () -> Unit) {
+                      buttons.addView(Button(this).apply {
+                          text = label
+                          textSize = 10f
+                          setOnClickListener { action() }
+                      })
+                  }
+
+                  addAction("Undo") { drawing.undo() }
+                  addAction("Eraser") { drawing.currentColor = Color.TRANSPARENT }
+                  addAction("Draw") { drawing.currentColor = selectedColor }
+                  addAction("Clear") { drawing.clearPixels() }
+                  addAction("PNG") { exportPng() }
+
+                  root.addView(buttons)
+                  setContentView(root)
+              }
+
+              private fun exportPng() {
+                  try {
+                      val bitmap = drawing.exportBitmap()
+                      val folder = File(
+                          getExternalFilesDir(null),
+                          "Pictures"
+                      )
+                      folder.mkdirs()
+                      val file = File(
+                          folder,
+                          "PixelForge-${System.currentTimeMillis()}.png"
+                      )
+                      FileOutputStream(file).use {
+                          bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                      }
+                      Toast.makeText(
+                          this,
+                          "PNG saved: ${file.name}",
+                          Toast.LENGTH_LONG
+                      ).show()
+                  } catch (e: Exception) {
+                      Toast.makeText(
+                          this,
+                          "Export error: ${e.message}",
+                          Toast.LENGTH_LONG
+                      ).show()
+                  }
+              }
+
+              inner class PixelCanvas : View(this@MainActivity) {
+                  private val size = 32
+                  private val pixels = IntArray(size * size) {
+                      Color.TRANSPARENT
+                  }
+                  private val paint = Paint().apply {
+                      isAntiAlias = false
+                  }
+                  private val history = ArrayDeque<IntArray>()
+                  var currentColor = Color.BLACK
+                  private var lastCell = -1
+
+                  override fun onDraw(canvas: Canvas) {
+                      super.onDraw(canvas)
+                      canvas.drawColor(Color.rgb(235, 235, 235))
+
+                      val cell = minOf(width, height).toFloat() / size
+                      val left = (width - cell * size) / 2f
+                      val top = (height - cell * size) / 2f
+
+                      for (y in 0 until size) {
+                          for (x in 0 until size) {
+                              val rect = RectF(
+                                  left + x * cell,
+                                  top + y * cell,
+                                  left + (x + 1) * cell,
+                                  top + (y + 1) * cell
+                              )
+
+                              paint.color = if ((x + y) % 2 == 0) {
+                                  Color.WHITE
+                              } else {
+                                  0xFFE2E2E2.toInt()
+                              }
+                              canvas.drawRect(rect, paint)
+
+                              val pixel = pixels[y * size + x]
+                              if (pixel != Color.TRANSPARENT) {
+                                  paint.color = pixel
+                                  canvas.drawRect(rect, paint)
+                              }
+
+                              paint.color = 0x22000000
+                              paint.style = Paint.Style.STROKE
+                              paint.strokeWidth = 0.5f
+                              canvas.drawRect(rect, paint)
+                              paint.style = Paint.Style.FILL
+                          }
+                      }
+                  }
+
+                  override fun onTouchEvent(event: MotionEvent): Boolean {
+                      val cell = minOf(width, height).toFloat() / size
+                      val left = (width - cell * size) / 2f
+                      val top = (height - cell * size) / 2f
+
+                      when (event.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              history.addLast(pixels.clone())
+                              while (history.size > 30) history.removeFirst()
+                              lastCell = -1
+                              paintAt(event.x, event.y, cell, left, top)
+                              return true
+                          }
+
+                          MotionEvent.ACTION_MOVE -> {
+                              paintAt(event.x, event.y, cell, left, top)
+                              return true
+                          }
+
+                          MotionEvent.ACTION_UP -> {
+                              lastCell = -1
+                              performClick()
+                              return true
+                          }
+                      }
+                      return true
+                  }
+
+                  private fun paintAt(
+                      px: Float,
+                      py: Float,
+                      cell: Float,
+                      left: Float,
+                      top: Float
+                  ) {
+                      val x = ((px - left) / cell).toInt()
+                      val y = ((py - top) / cell).toInt()
+
+                      if (x !in 0 until size || y !in 0 until size) return
+
+                      val index = y * size + x
+                      if (index != lastCell) {
+                          pixels[index] = currentColor
+                          lastCell = index
+                          invalidate()
+                      }
+                  }
+
+                  override fun performClick(): Boolean {
+                      super.performClick()
+                      return true
+                  }
+
+                  fun undo() {
+                      if (history.isNotEmpty()) {
+                          val old = history.removeLast()
+                          for (i in pixels.indices) pixels[i] = old[i]
+                          invalidate()
+                      }
+                  }
+
+                  fun clearPixels() {
+                      history.addLast(pixels.clone())
+                      for (i in pixels.indices) {
+                          pixels[i] = Color.TRANSPARENT
+                      }
+                      invalidate()
+                  }
+
+                  fun exportBitmap(): Bitmap {
+                      return Bitmap.createBitmap(
+                          size,
+                          size,
+                          Bitmap.Config.ARGB_8888
+                      ).apply {
+                          setPixels(pixels, 0, size, 0, 0, size, size)
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelForge-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
